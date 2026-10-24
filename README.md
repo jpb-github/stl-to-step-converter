@@ -29,10 +29,10 @@ Install the skill by cloning this repo into your skills folder. The folder name 
 
 ```
 # personal (all projects)
-git clone <this-repo-url> ~/.claude/skills/stl-to-drawing-and-step
+git clone https://github.com/jpb-github/stl-to-step-converter.git ~/.claude/skills/stl-to-drawing-and-step
 
 # or per project
-git clone <this-repo-url> <project>/.claude/skills/stl-to-drawing-and-step
+git clone https://github.com/jpb-github/stl-to-step-converter.git <project>/.claude/skills/stl-to-drawing-and-step
 ```
 
 On Windows PowerShell, `~` is `$env:USERPROFILE`. Restart Claude Code (or start a new session) and check that `stl-to-drawing-and-step` is listed.
