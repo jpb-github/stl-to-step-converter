@@ -3,7 +3,7 @@
 
 Usage:
   python verify_step.py PART.stl PART.step [--tol 0.05] [--per-axis 8] [--planes "x=15.9,y=222,z=40"]
-                        [--supports supports.json] [--out OUTDIR] [--origin bbox-min|none]
+                        [--supports supports.json] [--out OUTDIR] [--origin bbox-min|none] [--jobs N]
 
 Both sections (STL and tessellated STEP) are cut on the same planes, each outline is sampled every
 --step mm, and nearest distances are measured both ways with a KD-tree. Samples that fall inside a
@@ -19,6 +19,7 @@ Exit code: 0 all planes pass, 1 any plane fails, 2 input/model error.
 Requires: numpy, scipy, cadquery. Optional: matplotlib (overlay PNGs of failing planes).
 """
 import argparse, json, os, sys
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -48,6 +49,29 @@ def tessellate(shape, tol=0.002, ang=0.05):
     v, t = shape.val().tessellate(tol, ang)
     V = np.array([[p.x, p.y, p.z] for p in v])
     return V[np.array(t)]
+
+
+def _tess_part(args):
+    """Worker: import the STEP and tessellate every n-th face (k, n). Returns (M,3,3) triangles."""
+    path, k, n, tol, ang = args
+    import cadquery as cq
+    out = []
+    for f in cq.importers.importStep(path).faces().vals()[k::n]:
+        v, t = f.tessellate(tol, ang)
+        if len(t): out.append(np.array([[p.x, p.y, p.z] for p in v])[np.array(t)])
+    return np.concatenate(out) if out else np.zeros((0, 3, 3))
+
+
+def load_and_tessellate(path, jobs, tol=0.002, ang=0.05):
+    """Same result as load_step + tessellate, with the faces split over `jobs` processes.
+    The main process loads the STEP for validity/volume while the workers tessellate."""
+    if jobs <= 1:
+        shape, info = load_step(path)
+        return info, tessellate(shape, tol, ang)
+    with ProcessPoolExecutor(jobs) as ex:
+        futs = [ex.submit(_tess_part, (path, k, jobs, tol, ang)) for k in range(jobs)]
+        shape, info = load_step(path)
+        return info, np.concatenate([f.result() for f in futs])
 
 
 def section(tri, axis, val):
@@ -118,6 +142,35 @@ def stats(r):
             np.percentile(np.r_[dA, dB], 99) if len(dA) + len(dB) else 0.0)
 
 
+_G = {}
+
+
+def _init(stl, stp, regions, tol, h, offset):
+    _G.update(stl=stl, stp=stp, regions=regions, tol=tol, h=h, offset=offset)
+
+
+def _plane(task):
+    """One plane, with the offset re-cut for grazing artefacts. Runs in a worker process.
+    Returns (axis, plane used, stats, ok, worst-point text, comparison data for overlays if it failed) or None."""
+    ax, val = task
+    stl, stp, regions, tol, h, offset = (_G[k] for k in ("stl", "stp", "regions", "tol", "h", "offset"))
+    r = compare(stl, stp, ax, val, h, regions)
+    if r is None: return None
+    s1 = stats(r); worst = max(s1[0], s1[1]); used = val; rr = r
+    if worst > tol:
+        r2 = compare(stl, stp, ax, val + offset, h, regions)
+        if r2 is not None:
+            s2 = stats(r2)
+            if max(s2[0], s2[1]) < worst: worst, used, rr, s1 = max(s2[0], s2[1]), val + offset, r2, s2
+    ok = worst <= tol
+    loc = ""
+    if not ok:
+        cand = [(rr["da"][i], rr["qa"][i], "STEP") for i in [int(np.argmax(np.where(rr["ma"], -1, rr["da"])))]] + \
+               [(rr["db"][i], rr["qb"][i], "STL") for i in [int(np.argmax(np.where(rr["mb"], -1, rr["db"])))]]
+        d, q, who = max(cand, key=lambda c: c[0]); loc = f"worst {d:.2f} at ({q[0]:.1f}, {q[1]:.1f}, {q[2]:.1f}) on {who} outline"
+    return ax, used, s1, ok, loc, (rr if not ok else None)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stl"); ap.add_argument("step")
@@ -129,11 +182,12 @@ def main():
     ap.add_argument("--step-mm", type=float, default=0.02, dest="h")
     ap.add_argument("--offset", type=float, default=0.31)
     ap.add_argument("--origin", default="bbox-min", choices=["bbox-min", "none"])
+    ap.add_argument("--jobs", type=int, default=0, help="worker processes for tessellation and planes (default min(6, cpu count); 1 = serial)")
     a = ap.parse_args()
+    jobs = a.jobs or min(6, os.cpu_count() or 1)
     try:
         stl = load_stl(a.stl)
-        shape, info = load_step(a.step)
-        stp = tessellate(shape)
+        info, stp = load_and_tessellate(a.step, jobs)
     except Exception as e:
         print("ERROR loading inputs:", e); return 2
     if a.origin == "bbox-min":
@@ -151,20 +205,15 @@ def main():
     for item in filter(None, a.planes.split(",")):
         k, v = item.split("="); planes.append(("xyz".index(k.strip().lower()), float(v)))
     fails = []; rows = []
-    for ax, val in planes:
-        r = compare(stl, stp, ax, val, a.h, regions)
-        if r is None: continue
-        s1 = stats(r); worst = max(s1[0], s1[1]); used = val; rr = r
-        if worst > a.tol:
-            r2 = compare(stl, stp, ax, val + a.offset, a.h, regions)
-            if r2 is not None:
-                s2 = stats(r2)
-                if max(s2[0], s2[1]) < worst: worst, used, rr, s1 = max(s2[0], s2[1]), val + a.offset, r2, s2
-        ok = worst <= a.tol
-        loc = ""
-        if not ok:
-            cand = [(rr["da"][i], rr["qa"][i], "STEP") for i in [int(np.argmax(np.where(rr["ma"], -1, rr["da"])))]] +                    [(rr["db"][i], rr["qb"][i], "STL") for i in [int(np.argmax(np.where(rr["mb"], -1, rr["db"])))]]
-            d, q, who = max(cand, key=lambda c: c[0]); loc = f"worst {d:.2f} at ({q[0]:.1f}, {q[1]:.1f}, {q[2]:.1f}) on {who} outline"
+    ctx =(stl, stp, regions, a.tol, a.h, a.offset)
+    if jobs > 1 and len(planes) > 1:
+        with ProcessPoolExecutor(min(jobs, len(planes)), initializer=_init, initargs=ctx) as ex:
+            results = list(ex.map(_plane, planes))
+    else:
+        _init(*ctx); results = [_plane(p) for p in planes]
+    for res in results:
+        if res is None: continue
+        ax, used, s1, ok, loc, rr = res
         rows.append((ax, used, s1[0], s1[1], s1[2], ok, loc))
         if not ok: fails.append((ax, used, rr))
     print(f"\n{'plane':<10}{'STEP->STL':>11}{'STL->STEP':>11}{'p99':>8}  result")

@@ -26,16 +26,16 @@ Environment: Windows, Python 3.12 (`pip install numpy scipy matplotlib shapely c
 | Task | Tool | Used for |
 |---|---|---|
 | 1 Load, sanity check | numpy | Parse binary/ASCII STL (`frombuffer` with a structured dtype), bbox, signed volume, edge-use counts (`np.unique` on sorted edges), face-normal histograms |
-| 2 Sections | numpy | Plane-triangle intersection (vectorised), ray probes along an axis (Moller-Trumbore or barycentric test, list all crossings), local thickness (ray along inward normal, chunks of 400 triangles) |
+| 2 Sections | numpy | Plane-triangle intersection (vectorised), ray probes along an axis (Moller-Trumbore or barycentric test, list all crossings), local thickness and any ray-vs-mesh test: `scripts/gpu_kernels.py` (`local_thickness`, `first_hit`; numba on all cores, whole mesh in seconds). Do not write numpy ray loops |
 | 2 Section outlines | numpy + shapely | Chain segments into loops, even-odd polygons, `simplify(0.03)` to print vertices, circle fits (least squares), ring area filters |
 | 2 Connectivity | scipy.sparse.csgraph | `connected_components` on vertex/edge graphs to cluster thin triangles and find shells |
 | 2 Look at geometry | matplotlib (Agg) + Read | `LineCollection` section plots with zoom windows and grid, saved to PNG and opened with Read; feature-edge line views |
 | 3 Views | matplotlib | `PdfPages`, A3 figure 420 x 297 mm, one full-page axes in paper mm; helper functions for dimensions, leaders, centrelines, title block |
-| 3 Hidden lines | numpy | Feature edges (dihedral > 30 deg) and a triangle z-buffer rasteriser |
+| 3 Hidden lines | numpy + `scripts/gpu_kernels.py` | Feature edges (dihedral > 30 deg); visibility of each edge piece with `occluded(points, view_dir, tri)` |
 | 3 Hatching | shapely | Polygon from section loops, parallel lines clipped to the polygon |
 | 3 Check the PDF | pymupdf (`import pymupdf`) | Rasterise each PDF page to PNG at 75 dpi, then Read the PNG |
 | 4 STEP | cadquery (OCP kernel) | `Workplane` boxes, `polyline().close().extrude()`, `loft`, `fillet`, `chamfer`, `union`, `cut`, `exporters.export` |
-| 4 Verify STEP | `scripts/verify_step.py` | Size test below (numpy, scipy `cKDTree`, cadquery import and tessellate) |
+| 4 Verify STEP | `scripts/verify_step.py` | Size test below (numpy, scipy `cKDTree`, cadquery import and tessellate; runs on `--jobs` processes, default 6) |
 | Avoid | trimesh `closest_point`, pymeshfix, OCC sewing of the STL, 1.5M-point nearest-neighbour clouds | Memory blow-ups, deleted bodies, invalid solids, or meaningless distances |
 
 ## Fidelity split
@@ -58,7 +58,7 @@ Environment: Windows, Python 3.12 (`pip install numpy scipy matplotlib shapely c
 - Holes: chain section segments into closed loops, fit circles by least squares, report diameter, centre, pitch, count. Cluster centres to detect grids. Probe along the axis to classify through vs blind.
 - Also measure chamfers, fillet/corner radii (fit from first-crossing offsets), slots (stadium vs rectangle), steps, ramps, angles.
 - When a reading looks odd, zoom the section on the feature and extract the exact outline coordinates. Never describe a profile from coarse probes alone.
-- Find thin features objectively: for every triangle, cast a ray along its inward normal and record the distance to the first hit (local thickness; vectorise in chunks, about 3 min for 40k triangles). Cluster triangles under 1 mm by vertex connectivity and list each cluster's bbox, thickness and area.
+- Find thin features objectively: for every triangle, cast a ray along its inward normal and record the distance to the first hit (`gpu_kernels.local_thickness(tri)`: about 7 s for 74k triangles; the numpy chunk loop took about 15 min). Cluster triangles under 1 mm by vertex connectivity and list each cluster's bbox, thickness and area.
 - Classify each thin cluster (0.2 to 1 mm) as **support** or **feature/uncertain**. Support = floating or comb-segmented plates inside a groove or slot with clearance on all sides, or a 0.2 mm skin closing a hole. Anything else stays uncertain. Measure all of them regardless; this classification drives only the STEP.
 - State the measurement accuracy (driven by mesh tessellation and probe spacing).
 
@@ -72,7 +72,7 @@ Axes sized in paper mm at true scale so dimension text is a consistent size. One
 
 Title block on every sheet: part name, units, origin, scale, projection, date, "as-measured" revision, tolerance = measurement accuracy, sheet n of N.
 
-Hidden lines: project mesh feature edges (dihedral > 30 deg), split into 0.6 mm pieces and test each against a numpy z-buffer of the triangles (about 6 s per view). Draw hidden pieces dashed and drop those shorter than 0.8 mm. Section views: hatch shapely polygons built from the chained section loops (even-odd). Place every leader's text in the view's data coordinates, not in absolute paper mm.
+Hidden lines: project mesh feature edges (dihedral > 30 deg), split into 0.6 mm pieces and test each piece's midpoint with `gpu_kernels.occluded(points, view_dir, tri, bias=0.02)` (view_dir points from the part toward the viewer; 100k points take about 3 s). Draw hidden pieces dashed and drop those shorter than 0.8 mm. Section views: hatch shapely polygons built from the chained section loops (even-odd). Place every leader's text in the view's data coordinates, not in absolute paper mm.
 
 Then render the PDF pages to images (`pip install pymupdf`), LOOK at them, fix overlaps (labels over geometry, text over text, leaders crossing dimensions) and re-render until clean. Verify every number on the drawing against the measured data.
 
@@ -113,7 +113,7 @@ Pass criteria (all required):
 5. If a failure is only the sag of a faceted STL arc (R x (1 - cos(pi / facets)), compute it), list it in the notes with the arc radius and facet count rather than distorting the model. Nothing else may be excused.
 
 How the script avoids false failures: a failing plane is re-cut 0.31 mm away, because a plane lying exactly on a wall, chamfer end or cylinder axis gives false deviations of several mm; a real error persists, an artefact does not. It passes if either cut passes. It also never builds a nearest-point cloud on the whole surface.
-Kill stray python processes after any timeout.
+Kill stray python processes after any timeout. `--jobs N` sets the worker processes (default min(6, cores); the machine has 6 physical cores, more does not help). Tessellating the STEP dominates the run time, and it is split over the workers by face.
 
 ## 5. Publish to the `step` folder (last step, after verification passes)
 Create `step/` inside the part's folder (reuse it if present; overwrite same-named files) and copy exactly three files into it:

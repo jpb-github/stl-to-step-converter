@@ -15,6 +15,7 @@ Dimensional accuracy comes first. The STEP is built by CSG (extrusions, cylinder
 |---|---|
 | `SKILL.md` | The skill: workflow, tools per task, pass criteria |
 | `scripts/verify_step.py` | Size test: compares STL and STEP section outlines on many planes (default tolerance 0.05 mm) |
+| `scripts/gpu_kernels.py` | Ray kernels: local thickness and hidden-line visibility. Backends: numba (default, all cores, float64), CUDA via torch (opt-in), numpy fallback |
 | `scripts/supports_S5Box2F.json` | Example list of removed supports for the verifier |
 
 ## Install in Claude Code
@@ -22,8 +23,10 @@ Dimensional accuracy comes first. The STEP is built by CSG (extrusions, cylinder
 Requirements: Claude Code CLI, Python 3.12, then:
 
 ```
-pip install numpy scipy matplotlib shapely cadquery pymupdf
+pip install numpy scipy matplotlib shapely cadquery pymupdf numba
 ```
+
+`numba` is optional (the ray kernels fall back to a slow numpy path without it). `torch` with CUDA is optional and only used if you pass `backend="cuda"`.
 
 Install the skill by cloning this repo into your skills folder. The folder name must match the skill name.
 
@@ -59,7 +62,7 @@ step/My Part_drawing.pdf
 To re-run the size test by hand:
 
 ```
-python scripts/verify_step.py "My Part.stl" "My Part_clean.step" --tol 0.05 --supports supports.json --out fail_overlays [--planes "x=15.9,y=222"]
+python scripts/verify_step.py "My Part.stl" "My Part_clean.step" --tol 0.05 --supports supports.json --out fail_overlays [--planes "x=15.9,y=222"] [--jobs 6]
 ```
 
 Exit code 0 = all planes within tolerance, 1 = a plane fails (see overlays), 2 = input error. `supports.json` format is in the script header.
@@ -74,5 +77,18 @@ Exit code 0 = all planes within tolerance, 1 = a plane fails (see overlays), 2 =
 - **No mesh repair.** Watertight checks only report problems.
 - **Units and orientation:** mm assumed. A part rotated about Z is aligned first; the origin is the bounding-box minimum corner.
 - **Time and effort:** a part like the S5 box took many hand-built measurement scripts. The skill is a guide for the agent, not a one-command converter. The verifier alone takes about 40 s.
+
 - **Hardware/OS:** developed on Windows with CadQuery (OpenCascade). Large probes (nearest-point clouds, trimesh `closest_point`) can use tens of GB of memory and are explicitly avoided.
 - **The `step/` folder is overwritten** on each run for same-named files.
+
+## Performance
+
+Measured on a 6-core CPU (12 threads) and an RTX 4070, on a 73,724-triangle part:
+
+| Task | Before | After |
+|---|---|---|
+| Local thickness, whole mesh | about 15 min (numpy, extrapolated from 2000 rays) | 5 to 7 s (numba); 4.5 s (CUDA) |
+| Hidden-line visibility, 100k points | not measured | 2.5 s (numba); 6 s (CUDA) |
+| `verify_step.py`, 24 planes, STEP of 1.9M triangles | 152 s | 61 s with 6 jobs |
+
+CUDA is not the default: it is no faster than numba here and float32 gave a wrong result on 2 of 73,723 grazing rays (numba matches the float64 numpy reference exactly). Verifier output is identical except p99 values in the third decimal.
