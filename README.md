@@ -77,7 +77,6 @@ Exit code 0 = all planes within tolerance, 1 = a plane fails (see overlays), 2 =
 - **No mesh repair.** Watertight checks only report problems.
 - **Units and orientation:** mm assumed. A part rotated about Z is aligned first; the origin is the bounding-box minimum corner.
 - **Time and effort:** a part like the S5 box took many hand-built measurement scripts. The skill is a guide for the agent, not a one-command converter. The verifier alone takes about 40 s.
-
 - **Hardware/OS:** developed on Windows with CadQuery (OpenCascade). Large probes (nearest-point clouds, trimesh `closest_point`) can use tens of GB of memory and are explicitly avoided.
 - **The `step/` folder is overwritten** on each run for same-named files.
 
