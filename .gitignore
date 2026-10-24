@@ -1,0 +1,10 @@
+# test parts and generated outputs
+*.stl
+*.step
+*.stp
+*.pdf
+step/
+fail*/
+CLAUDE DO NOT READ/
+__pycache__/
+*.pyc
